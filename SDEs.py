@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 import jax.random as jrandom
+import lineax as lx
 from diffrax import diffeqsolve, ControlTerm, Euler, MultiTerm, ODETerm, SaveAt, VirtualBrownianTree
 import equinox as eqx
 DEBUG = False
@@ -930,6 +931,7 @@ class MomentumFirstOrderFlow:
         ts,
         key,
         t0=0,
+        save_fn=None,
     ):
         if self.stochastic:
             brownian_motion = (
@@ -957,6 +959,17 @@ class MomentumFirstOrderFlow:
             terms = ODETerm(
                 self.drift
             )
+        if save_fn is None:
+            saveat = SaveAt(
+                ts=ts
+            )
+        else:
+            saveat = SaveAt(
+                ts=ts,
+                fn=lambda time, state, arguments: (
+                    save_fn(state)
+                ),
+            )
 
         return diffeqsolve(
             terms,
@@ -965,9 +978,7 @@ class MomentumFirstOrderFlow:
             t,
             dt0,
             y0=init_x,
-            saveat=SaveAt(
-                ts=ts
-            ),
+            saveat=saveat,
             max_steps=None,
         )
 
@@ -980,6 +991,7 @@ class MomentumSecondOrderFlow(MomentumFirstOrderFlow):
         cov_mat_func,
         brownian_tol=1e-6,
         stochastic=True,
+        isotropic_sigma=None,
     ):
         super().__init__(
             stepsize,
@@ -990,6 +1002,8 @@ class MomentumSecondOrderFlow(MomentumFirstOrderFlow):
             stochastic=stochastic,
         )
 
+        self.isotropic_sigma = isotropic_sigma
+
     def drift(self, t, x, args):
         del t, args
 
@@ -997,24 +1011,25 @@ class MomentumSecondOrderFlow(MomentumFirstOrderFlow):
             self.stepsize,
             dtype=x.dtype,
         )
+
         mu = jnp.asarray(
             self.momentum,
             dtype=x.dtype,
         )
 
-        # Linearize grad f at x:
+        # grad = grad f(x)
         #
-        #     D(grad f)(x)[v] = Hessian(f)(x) @ v.
+        # hvp(v) = Hessian(f)(x) @ v
         #
-        # This returns grad f(x) and a function that computes
-        # Hessian-vector products without constructing the Hessian.
+        # The Hessian is never explicitly constructed.
         grad, hvp = jax.linearize(
             self.grad,
             x,
         )
 
-        # Compute Hessian(f)(x) @ grad f(x).
-        hessian_grad = hvp(grad)
+        hessian_grad = hvp(
+            grad
+        )
 
         correction = (
             eta
@@ -1028,6 +1043,50 @@ class MomentumSecondOrderFlow(MomentumFirstOrderFlow):
         return (
             -grad / (1.0 - mu)
             - correction * hessian_grad
+        )
+
+    def diffusion(self, t, x, args):
+        del t, args
+
+        if self.isotropic_sigma is None:
+            # Backward-compatible path. This may construct a
+            # dense covariance and should not be used for the
+            # large-network experiments.
+            return super().diffusion(
+                0.0,
+                x,
+                None,
+            )
+
+        eta = jnp.asarray(
+            self.stepsize,
+            dtype=x.dtype,
+        )
+
+        mu = jnp.asarray(
+            self.momentum,
+            dtype=x.dtype,
+        )
+
+        sigma = jnp.asarray(
+            self.isotropic_sigma,
+            dtype=x.dtype,
+        )
+
+        diagonal = (
+            jnp.sqrt(eta)
+            * sigma
+            / (1.0 - mu)
+            * jnp.ones_like(x)
+        )
+
+        # Represents
+        #
+        #   sqrt(eta) * sigma/(1-mu) * I
+        #
+        # without allocating a d-by-d identity matrix.
+        return lx.DiagonalLinearOperator(
+            diagonal
         )
 
 class LiConstantMomentumSME1:

@@ -395,6 +395,7 @@ parser.add_argument(
     choices=(
         "nn",
         "quadratic",
+        "c1-cnn-smooth",
         "vgg",
         "resnet-18",
         "resnet-50",
@@ -408,6 +409,7 @@ parser.add_argument(
     type=str,
     choices=(
         "iris",
+        "mnist",
         "cifar-10",
         "imagenet",
     ),
@@ -459,6 +461,16 @@ parser.add_argument(
         "from Section 4.2.1 of Li, Tai and E and compare "
         "its weak objective error with the limiting "
         "Momentum HA-SME."
+    ),
+)
+
+parser.add_argument(
+    "--sme2_only",
+    action="store_true",
+    help=(
+        "Run only the discrete SGDM reference and "
+        "Momentum-SME-2. This is the memory-efficient mode "
+        "for large neural-network error experiments."
     ),
 )
 
@@ -790,28 +802,26 @@ algorithms = [
     REFERENCE_ALGORITHM,
 ]
 
-if args.figure13_only:
-    # Figure 13 does not require HA-SME or SME-2.
+if args.sme2_only:
+    algorithms.append(
+        "Momentum-SME-2"
+    )
 
-    # Include SME-1 if Figure 13 uses it.
+elif args.figure13_only:
     algorithms.append(
         "Momentum-SME-1"
     )
 
 else:
     if args.complex_pf:
-        # Complex PF replaces the real-valued Momentum HA-SME.
         algorithms.append(
             COMPLEX_PF_ALGORITHM
         )
-
     else:
-        # Run the real-valued HA-SME when complex PF is off.
         algorithms.append(
             "Momentum-HA-SME"
         )
 
-    # SME-1 and SME-2 are included in the full experiment.
     algorithms.extend(
         [
             "Momentum-SME-1",
@@ -861,6 +871,86 @@ display_names = {
         "Momentum SME-2"
     ),
 }
+
+def load_mnist(
+    data_dir=None,
+    max_train_samples=None,
+    max_test_samples=None,
+):
+    if data_dir is None:
+        data_dir = "./data"
+
+    train_dataset = datasets.MNIST(
+        root=data_dir,
+        train=True,
+        download=True,
+    )
+
+    test_dataset = datasets.MNIST(
+        root=data_dir,
+        train=False,
+        download=True,
+    )
+
+    X_train = np.asarray(
+        train_dataset.data,
+        dtype=np.float64,
+    ) / 255.0
+
+    X_test = np.asarray(
+        test_dataset.data,
+        dtype=np.float64,
+    ) / 255.0
+
+    # Add a channel dimension so both dense and convolutional
+    # networks can use the same arrays.
+    X_train = X_train[..., None]
+    X_test = X_test[..., None]
+
+    y_train = np.asarray(
+        train_dataset.targets,
+        dtype=np.int32,
+    )
+
+    y_test = np.asarray(
+        test_dataset.targets,
+        dtype=np.int32,
+    )
+
+    if max_train_samples is not None:
+        X_train = X_train[
+            :max_train_samples
+        ]
+        y_train = y_train[
+            :max_train_samples
+        ]
+
+    if max_test_samples is not None:
+        X_test = X_test[
+            :max_test_samples
+        ]
+        y_test = y_test[
+            :max_test_samples
+        ]
+
+    y_train = jax.nn.one_hot(
+        y_train,
+        10,
+        dtype=jnp.float64,
+    )
+
+    y_test = jax.nn.one_hot(
+        y_test,
+        10,
+        dtype=jnp.float64,
+    )
+
+    return (
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+    )
 
 
 def load_cifar10(
@@ -1004,6 +1094,18 @@ if args.dataset == "iris":
 
     X_train = scaler.fit_transform(X_train)
     X_test = scaler.transform(X_test)
+
+elif args.dataset == "mnist":
+    (
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+    ) = load_mnist(
+        data_dir=args.data_dir,
+        max_train_samples=args.max_train_samples,
+        max_test_samples=args.max_test_samples,
+    )
 
 elif args.dataset == "cifar-10":
     (
@@ -1473,6 +1575,70 @@ class ResNet50(nn.Module):
 
         return x
 
+class SmoothC1CNN(nn.Module):
+    num_classes: int
+
+    @nn.compact
+    def __call__(self, x):
+        for features in (
+            96,
+            128,
+            256,
+            64,
+        ):
+            x = nn.Conv(
+                features=features,
+                kernel_size=(5, 5),
+                strides=(1, 1),
+                padding="SAME",
+                dtype=None,
+                param_dtype=jnp.float64,
+            )(x)
+
+            x = jax.nn.softplus(
+                x
+            )
+
+            # Average pooling is used instead of max pooling
+            # to preserve smoothness.
+            x = nn.avg_pool(
+                x,
+                window_shape=(2, 2),
+                strides=(2, 2),
+                padding="VALID",
+            )
+
+        x = x.reshape(
+            x.shape[0],
+            -1,
+        )
+
+        x = nn.Dense(
+            features=1024,
+            dtype=None,
+            param_dtype=jnp.float64,
+        )(x)
+
+        x = jax.nn.softplus(
+            x
+        )
+
+        x = nn.Dense(
+            features=256,
+            dtype=None,
+            param_dtype=jnp.float64,
+        )(x)
+
+        x = jax.nn.softplus(
+            x
+        )
+
+        return nn.Dense(
+            features=self.num_classes,
+            dtype=None,
+            param_dtype=jnp.float64,
+        )(x)
+
 
 
 
@@ -1532,7 +1698,13 @@ hidden_widths = tuple(
 if args.dataset == "iris":
     num_classes = 3
 
-elif args.dataset == "cifar-10":
+if args.dataset == "iris":
+    num_classes = 3
+
+elif args.dataset in (
+    "mnist",
+    "cifar-10",
+):
     num_classes = 10
 
 elif args.dataset == "imagenet":
@@ -1547,6 +1719,11 @@ if args.architecture == "nn":
     model = SimpleNN(
         hidden_widths=hidden_widths,
         activation=args.activation,
+        num_classes=num_classes,
+    )
+
+elif args.architecture == "c1-cnn-smooth":
+    model = SmoothC1CNN(
         num_classes=num_classes,
     )
 
@@ -1595,7 +1772,7 @@ else:
     params = model.init(
         key,
         jnp.ones(
-            input_shape,
+            (1, *input_shape),
             dtype=jnp.float64,
         ),
     )["params"]
@@ -2558,6 +2735,229 @@ def gdm_step(
     )
 
     return x_next, x
+
+def run_discrete_reference_loss_trials(
+    keys,
+    num_steps,
+    eta,
+    mu,
+    sigma,
+    init_param,
+    batch_size,
+):
+    init_x, _ = ravel_pytree(
+        init_param
+    )
+
+    eta_value = jnp.asarray(
+        eta,
+        dtype=init_x.dtype,
+    )
+
+    mu_value = jnp.asarray(
+        mu,
+        dtype=init_x.dtype,
+    )
+
+    sigma_value = jnp.asarray(
+        sigma,
+        dtype=init_x.dtype,
+    )
+
+    def run_single_trial(key):
+        def scan_step(
+            carry,
+            unused_input,
+        ):
+            del unused_input
+
+            x, x_prev, current_key = carry
+
+            current_key, step_key = (
+                jax.random.split(
+                    current_key
+                )
+            )
+
+            x_next, old_x = (
+                discrete_reference_step(
+                    x,
+                    x_prev,
+                    step_key,
+                    eta_value,
+                    mu_value,
+                    sigma_value,
+                )
+            )
+
+            loss = loss_fn_flat(
+                x_next
+            )
+
+            return (
+                (
+                    x_next,
+                    old_x,
+                    current_key,
+                ),
+                loss,
+            )
+
+        _, losses = jax.lax.scan(
+            scan_step,
+            (
+                init_x,
+                init_x,
+                key,
+            ),
+            xs=None,
+            length=num_steps,
+        )
+
+        return losses
+
+    all_batches = []
+
+    for batch_start in range(
+        0,
+        int(keys.shape[0]),
+        batch_size,
+    ):
+        batch_keys = keys[
+            batch_start:
+            batch_start + batch_size
+        ]
+
+        if int(batch_keys.shape[0]) == 1:
+            losses = run_single_trial(
+                batch_keys[0]
+            )[None, :]
+        else:
+            losses = jax.vmap(
+                run_single_trial
+            )(batch_keys)
+
+        all_batches.append(
+            jax.block_until_ready(
+                losses
+            )
+        )
+
+    all_losses = jnp.concatenate(
+        all_batches,
+        axis=0,
+    )
+
+    return (
+        jnp.mean(
+            all_losses,
+            axis=0,
+        ),
+        all_losses,
+    )
+
+def run_sme2_loss_trials(
+    keys,
+    num_steps,
+    eta,
+    mu,
+    sigma,
+    dt,
+    init_param,
+    brownian_tol,
+    batch_size,
+):
+    init_x, _ = ravel_pytree(
+        init_param
+    )
+
+    optimizer = MomentumSecondOrderFlow(
+        eta,
+        mu,
+        loss_fn_flat,
+        cov_mat_func=None,
+        brownian_tol=brownian_tol,
+        stochastic=True,
+        isotropic_sigma=sigma,
+    )
+
+    time_points = (
+        eta
+        * jnp.arange(
+            1,
+            num_steps + 1,
+            dtype=init_x.dtype,
+        )
+    )
+
+    end_time = time_points[-1]
+
+    def solve_single_run(key):
+        solution = optimizer.solve(
+            init_x,
+            end_time,
+            jnp.asarray(
+                dt,
+                dtype=init_x.dtype,
+            ),
+            time_points,
+            key,
+            save_fn=loss_fn_flat,
+        )
+
+        # SaveAt already evaluated loss_fn_flat, so this is
+        # shape (num_steps,), not (num_steps, d).
+        return solution.ys
+
+    all_batches = []
+
+    for batch_start in range(
+        0,
+        int(keys.shape[0]),
+        batch_size,
+    ):
+        batch_keys = keys[
+            batch_start:
+            batch_start + batch_size
+        ]
+
+        if int(batch_keys.shape[0]) == 1:
+            losses = solve_single_run(
+                batch_keys[0]
+            )[None, :]
+        else:
+            losses = jax.vmap(
+                solve_single_run
+            )(batch_keys)
+
+        losses = jax.block_until_ready(
+            losses
+        )
+
+        all_batches.append(
+            losses
+        )
+
+        print(
+            "Completed M-SME-2 runs "
+            f"{batch_start + 1}-"
+            f"{batch_start + int(batch_keys.shape[0])} "
+            f"of {int(keys.shape[0])}",
+            flush=True,
+        )
+
+    all_losses = jnp.concatenate(
+        all_batches,
+        axis=0,
+    )
+
+    return (
+        jnp.mean(
+            all_losses,
+            axis=0,
+        ),
+        all_losses,
+    )
 
 
 def run_discrete_reference_trials(
@@ -3624,7 +4024,7 @@ else:
         init_param = model.init(
             subkey,
             jnp.ones(
-                input_shape,
+                (1, *input_shape),
                 dtype=jnp.float64,
             ),
         )["params"]
@@ -4400,6 +4800,209 @@ if args.momentum_dal_fig19:
 
     # This flag runs a stand-alone inexpensive experiment.
     # Do not continue into all of the SDE/PF simulations.
+    if not DEBUG:
+        writer.close()
+
+    raise SystemExit(0)
+
+if args.sme2_only:
+    if args.discrete_method != "sgdm":
+        raise ValueError(
+            "--sme2_only currently requires "
+            "--discrete_method sgdm."
+        )
+
+    trial_root_key = jax.random.fold_in(
+        key,
+        1000003,
+    )
+
+    reference_keys = jax.random.split(
+        jax.random.fold_in(
+            trial_root_key,
+            0,
+        ),
+        num_runs,
+    )
+
+    sme2_keys = jax.random.split(
+        jax.random.fold_in(
+            trial_root_key,
+            1,
+        ),
+        num_runs,
+    )
+
+    print(
+        "\nRunning loss-only SGDM reference...",
+        flush=True,
+    )
+
+    (
+        reference_avg_losses,
+        reference_all_losses,
+    ) = run_discrete_reference_loss_trials(
+        keys=reference_keys,
+        num_steps=num_steps,
+        eta=eta,
+        mu=mu,
+        sigma=sigma,
+        init_param=init_param,
+        batch_size=args.sde_batch_size,
+    )
+
+    print(
+        "Running loss-only M-SME-2...",
+        flush=True,
+    )
+
+    (
+        sme2_avg_losses,
+        sme2_all_losses,
+    ) = run_sme2_loss_trials(
+        keys=sme2_keys,
+        num_steps=num_steps,
+        eta=eta,
+        mu=mu,
+        sigma=sigma,
+        dt=dt,
+        init_param=init_param,
+        brownian_tol=brownian_tol,
+        batch_size=args.sde_batch_size,
+    )
+
+    signed_error = (
+        sme2_avg_losses
+        - reference_avg_losses
+    )
+
+    weak_error = jnp.abs(
+        signed_error
+    )
+
+
+    maximum_index = int(
+        jnp.argmax(
+            weak_error
+        )
+    )
+
+    maximum_error = float(
+        weak_error[maximum_index]
+    )
+
+    terminal_error = float(
+        weak_error[-1]
+    )
+
+    rms_error = float(
+        jnp.sqrt(
+            jnp.mean(
+                weak_error**2
+            )
+        )
+    )
+
+    print(
+        "\nM-SME-2 error summary:"
+    )
+    print(
+        "  maximum weak loss error:",
+        f"{maximum_error:.12e}",
+    )
+    print(
+        "  maximum-error step:",
+        maximum_index + 1,
+    )
+    print(
+        "  terminal weak loss error:",
+        f"{terminal_error:.12e}",
+    )
+    print(
+        "  RMS weak loss error:",
+        f"{rms_error:.12e}",
+    )
+
+    result_dir = Path(
+        args.plot_dir
+    )
+    result_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    steps = np.arange(
+        1,
+        num_steps + 1,
+    )
+
+    result_stem = (
+        f"sme2_error_"
+        f"dataset_{args.dataset}_"
+        f"architecture_{args.architecture}_"
+        f"mu_{mu:g}_"
+        f"eta_{eta:g}_"
+        f"sigma_{sigma:g}_"
+        f"steps_{num_steps}_"
+        f"runs_{num_runs}_"
+        f"ratio_{args.eta_dt_ratio:g}_"
+        f"seed_{args.seed}"
+    )
+
+    plot_error = np.maximum(
+        np.asarray(
+            weak_error
+        ),
+        np.finfo(np.float64).tiny,
+    )
+
+    plt.figure(
+        figsize=(8, 5)
+    )
+
+    plt.plot(
+        steps,
+        plot_error,
+        color="tab:green",
+        linewidth=2.2,
+        label="M-SME-2 weak loss error",
+    )
+
+    plt.yscale(
+        "log"
+    )
+
+    plt.xlabel(
+        "SGDM step"
+    )
+
+    plt.ylabel(
+        r"$|\widehat{\mathbb{E}}[f(X_{k\eta})]"
+        r"-\widehat{\mathbb{E}}[f(x_k)]|$"
+    )
+
+    plt.title(
+        f"M-SME-2 approximation error\n"
+        f"{args.dataset}, {args.architecture}"
+    )
+
+    plt.grid(
+        True,
+        which="both",
+        alpha=0.3,
+    )
+
+    plt.legend()
+    plt.tight_layout()
+
+    plt.savefig(
+        result_dir / f"{result_stem}.png",
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    plt.close()
+
     if not DEBUG:
         writer.close()
 

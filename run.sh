@@ -5,7 +5,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-# Keep the complete ${...} expression on one line.
 PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/SGDM_venv/Scripts/python.exe}"
 
 if [[ ! -f "${PYTHON_BIN}" ]]; then
@@ -14,88 +13,55 @@ if [[ ! -f "${PYTHON_BIN}" ]]; then
     exit 1
 fi
 
-# Real-valued CPU experiment.
-export JAX_PLATFORMS=cpu
+# CPU by default. This can be overridden externally if a compatible
+# JAX GPU installation is available.
+export JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}"
+
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
+
 export PYTHONFAULTHANDLER=1
 export JAX_TRACEBACK_FILTERING=off
 
-ETA_DT_RATIO=100
+ETA_DT_RATIO=10
 
-PLOT_DIR="${SCRIPT_DIR}/plots/Computational efficiency"
-LOG_DIR="${SCRIPT_DIR}/logs/computational_efficiency"
-OUTPUT_LOG="${SCRIPT_DIR}/sgdm_computational_efficiency_ratio_${ETA_DT_RATIO}.log"
+PLOT_DIR="${SCRIPT_DIR}/plots/Computational efficiency/MNIST_MLP_small"
+LOG_DIR="${SCRIPT_DIR}/logs/Computational efficiency/MNIST_MLP_small"
+OUTPUT_LOG="${SCRIPT_DIR}/mnist_sme2_small.log"
 
 mkdir -p "${PLOT_DIR}"
 mkdir -p "${LOG_DIR}"
 
-EXTRA_ARGS=()
-
-# Optional initial-Hessian-only diagnostic:
-#
-#   HESSIAN_ONLY=1 ./run.sh
-if [[ "${HESSIAN_ONLY:-0}" == "1" ]]; then
-    EXTRA_ARGS+=(--hessian_diagnostic_only)
-fi
-
 echo "Python executable: ${PYTHON_BIN}"
-echo "Integration ratio: ${ETA_DT_RATIO}"
+echo "Experiment: small MNIST M-SME-2 error"
+echo "Integration ratio eta/dt: ${ETA_DT_RATIO}"
+echo "Plot directory: ${PLOT_DIR}"
+echo "TensorBoard directory: ${LOG_DIR}"
 
-"${PYTHON_BIN}" -c "import jax, flax; print('JAX:', jax.__version__); print('Flax:', flax.__version__); print('Devices:', jax.devices())"
+"${PYTHON_BIN}" -c \
+    "import jax, flax; print('JAX:', jax.__version__); print('Flax:', flax.__version__); print('Devices:', jax.devices())"
+
 "${PYTHON_BIN}" -u "${SCRIPT_DIR}/main_dist.py" \
-    --mu 0.3 \
-    --eta 0.033 \
-    --sigma 0.02 \
-    --num_steps 15 \
-    --num_runs 20 \
-    --eta_dt_ratio 100 \
-    --brownian_tol_ratio 0.1 \
-    --sde_batch_size 8 \
+    --sme2_only \
+    --dataset mnist \
     --architecture nn \
-    --hidden_widths 10 10 \
+    --hidden_widths 1024 \
     --activation softplus \
-    --dataset iris \
-    --discrete_method sgdm \
     --problem nn \
+    --discrete_method sgdm \
+    --mu 0.3 \
+    --eta 0.005 \
+    --sigma 0.02 \
+    --num_steps 20 \
+    --num_runs 20 \
+    --eta_dt_ratio "${ETA_DT_RATIO}" \
+    --brownian_tol_ratio 0.1 \
+    --sde_batch_size 1 \
+    --max_train_samples 1024 \
+    --max_test_samples 128 \
     --seed 0 \
     --plot_dir "${PLOT_DIR}" \
     --log_dir "${LOG_DIR}" \
-    --li_constant_momentum_sme1 \
-    "${EXTRA_ARGS[@]}" \
     2>&1 | tee "${OUTPUT_LOG}"
-
-
-    # --recurrence_local_errors \
-    # --momentum_dal_fig19 \
-    # --dal_fixed_etas 0.1 0.2 0.3 0.4 0.5 0.6 \
-    # --dal_target_ratio 1.0 \
-    # --dal_min_eta 1e-8 \
-    # --dal_max_eta 0.5 \
-
-    # --max_train_samples 1000 \
-    # --max_test_samples 200 \
-
-    # --fig13_gdm \
-    # --figure13_only \
-    # --fig13_start_step 1 \
-    # --fig13_end_step 100 \
-    # --fig13_flow_substeps 200 \
-
-
-    # --complex_pf \
-    # --num_runs 1 \
-    # --sigma 0.00 \
-    # --eta_dt_ratio "${ETA_DT_RATIO}" \
-    # --brownian_tol_ratio 0.1 \
-    # --sde_batch_size 1 \
-
-    # --quad_h11 7.0 \
-    # --quad_h12 1.0 \
-    # --quad_h22 1.0 \
-    # --quad_target_1 1.0 \
-    # --quad_target_2 1.0 \
-    # --quad_init_1 1.0 \
-    # --quad_init_2 2.0 \
