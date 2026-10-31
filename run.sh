@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 # Keep the complete ${...} expression on one line.
-PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/NN_venv/Scripts/python.exe}"
+PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/SGDM_venv/Scripts/python.exe}"
 
 if [[ ! -f "${PYTHON_BIN}" ]]; then
     echo "Python executable not found:" >&2
@@ -25,9 +25,9 @@ export JAX_TRACEBACK_FILTERING=off
 
 ETA_DT_RATIO=100
 
-PLOT_DIR="${SCRIPT_DIR}/plots/fig10_gdm"
-LOG_DIR="${SCRIPT_DIR}/logs/sgdm_real_30_steps_ratio_${ETA_DT_RATIO}"
-OUTPUT_LOG="${SCRIPT_DIR}/sgdm_real_30_steps_ratio_${ETA_DT_RATIO}.log"
+PLOT_DIR="${SCRIPT_DIR}/plots/Computational efficiency"
+LOG_DIR="${SCRIPT_DIR}/logs/computational_efficiency"
+OUTPUT_LOG="${SCRIPT_DIR}/sgdm_computational_efficiency_ratio_${ETA_DT_RATIO}.log"
 
 mkdir -p "${PLOT_DIR}"
 mkdir -p "${LOG_DIR}"
@@ -61,8 +61,8 @@ echo "Integration ratio: ${ETA_DT_RATIO}"
     --discrete_method sgdm \
     --problem nn \
     --seed 0 \
-    --plot_dir "${SCRIPT_DIR}/plots/memory_efficiency" \
-    --log_dir "${SCRIPT_DIR}/logs/memory_efficiency" \
+    --plot_dir "${PLOT_DIR}" \
+    --log_dir "${LOG_DIR}" \
     --li_constant_momentum_sme1 \
     "${EXTRA_ARGS[@]}" \
     2>&1 | tee "${OUTPUT_LOG}"

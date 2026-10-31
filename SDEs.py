@@ -990,24 +990,44 @@ class MomentumSecondOrderFlow(MomentumFirstOrderFlow):
             stochastic=stochastic,
         )
 
-        self.hessian = jax.hessian(f)
-
     def drift(self, t, x, args):
-        eta = self.stepsize
-        mu = self.momentum
+        del t, args
 
-        grad = self.grad(x)
-        hessian = self.hessian(x)
+        eta = jnp.asarray(
+            self.stepsize,
+            dtype=x.dtype,
+        )
+        mu = jnp.asarray(
+            self.momentum,
+            dtype=x.dtype,
+        )
+
+        # Linearize grad f at x:
+        #
+        #     D(grad f)(x)[v] = Hessian(f)(x) @ v.
+        #
+        # This returns grad f(x) and a function that computes
+        # Hessian-vector products without constructing the Hessian.
+        grad, hvp = jax.linearize(
+            self.grad,
+            x,
+        )
+
+        # Compute Hessian(f)(x) @ grad f(x).
+        hessian_grad = hvp(grad)
 
         correction = (
             eta
             * (1.0 + mu)
-            / (2.0 * (1.0 - mu)**3)
+            / (
+                2.0
+                * (1.0 - mu) ** 3
+            )
         )
 
         return (
             -grad / (1.0 - mu)
-            - correction * (hessian @ grad)
+            - correction * hessian_grad
         )
 
 class LiConstantMomentumSME1:
