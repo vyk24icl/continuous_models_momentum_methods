@@ -1,0 +1,52 @@
+Experiment configuration:
+  reference method: Stochastic Gradient Descent with Momentum
+  complex PF enabled: False
+  stochastic setting: True
+  eta: 0.005
+  mu: 0.3
+  effective sigma: 0.02
+  effective runs: 20
+  integration dt: 0.0005
+  final continuous time: 0.075
+Experiment time configuration:
+  eta: 0.005
+  SDE dt: 0.0005
+  Brownian tolerance: 5e-05
+  number of SGDM steps: 15
+  number of Monte Carlo runs: 20
+  resulting final SDE time: 0.075
+Algorithms selected: ['Discrete-Reference', 'Momentum-SME-2']
+TensorBoard log directory: C:/Users/victo/Downloads/SDE models of SGDM/continuous_models_momentum_methods/logs/Computational efficiency/CIFAR10_MLP_medium
+Initial parameter vector: [ 0.          0.          0.         ...  0.02265745 -0.11164306
+  0.08790432]
+Parameter dtype: float64
+Training-data dtype: float64
+
+Running loss-only SGDM reference...
+Running loss-only M-SME-2...
+Completed M-SME-2 runs 1-1 of 20
+Completed M-SME-2 runs 2-2 of 20
+Completed M-SME-2 runs 3-3 of 20
+Completed M-SME-2 runs 4-4 of 20
+Completed M-SME-2 runs 5-5 of 20
+Completed M-SME-2 runs 6-6 of 20
+Completed M-SME-2 runs 7-7 of 20
+Completed M-SME-2 runs 8-8 of 20
+Completed M-SME-2 runs 9-9 of 20
+Completed M-SME-2 runs 10-10 of 20
+Completed M-SME-2 runs 11-11 of 20
+Completed M-SME-2 runs 12-12 of 20
+Completed M-SME-2 runs 13-13 of 20
+Completed M-SME-2 runs 14-14 of 20
+Completed M-SME-2 runs 15-15 of 20
+Completed M-SME-2 runs 16-16 of 20
+Completed M-SME-2 runs 17-17 of 20
+Completed M-SME-2 runs 18-18 of 20
+Completed M-SME-2 runs 19-19 of 20
+Completed M-SME-2 runs 20-20 of 20
+
+M-SME-2 error summary:
+  maximum weak loss error: 1.288528820790e-02
+  maximum-error step: 1
+  terminal weak loss error: 2.327783651582e-03
+  RMS weak loss error: 4.662260413625e-03

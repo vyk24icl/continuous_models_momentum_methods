@@ -47,7 +47,7 @@ echo "TensorBoard directory: ${LOG_DIR}"
     --sme2_only \
     --dataset mnist \
     --architecture nn \
-    --hidden_widths 1024 \
+    --hidden_widths 1000 \
     --activation softplus \
     --problem nn \
     --discrete_method sgdm \
@@ -55,13 +55,12 @@ echo "TensorBoard directory: ${LOG_DIR}"
     --eta 0.005 \
     --sigma 0.02 \
     --num_steps 20 \
-    --num_runs 20 \
-    --eta_dt_ratio "${ETA_DT_RATIO}" \
-    --brownian_tol_ratio 0.1 \
+    --num_runs 50 \
+    --eta_dt_ratio 20 \
     --sde_batch_size 1 \
     --max_train_samples 1024 \
     --max_test_samples 128 \
     --seed 0 \
-    --plot_dir "${PLOT_DIR}" \
-    --log_dir "${LOG_DIR}" \
-    2>&1 | tee "${OUTPUT_LOG}"
+    --plot_dir "${SCRIPT_DIR}/plots/Computational efficiency/MNIST_SGDM_vs_M_SME2" \
+    --log_dir "${SCRIPT_DIR}/logs/Computational efficiency/MNIST_SGDM_vs_M_SME2" \
+    2>&1 | tee "${SCRIPT_DIR}/mnist_sgdm_vs_m_sme2.log"

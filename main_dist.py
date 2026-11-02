@@ -474,6 +474,16 @@ parser.add_argument(
     ),
 )
 
+parser.add_argument(
+    "--sme2_vs_phase_space",
+    action="store_true",
+    help=(
+        "Run only the discrete SGDM reference, M-SME-2, "
+        "and Li's constant-momentum phase-space SME-1. "
+        "Plot both weak objective errors relative to SGDM."
+    ),
+)
+
 
 
 args = parser.parse_args()
@@ -714,6 +724,24 @@ if (
         "be combined with --complex_pf."
     )
 
+if (
+    args.sme2_only
+    and args.sme2_vs_phase_space
+):
+    raise ValueError(
+        "--sme2_only and --sme2_vs_phase_space "
+        "cannot be used together."
+    )
+
+if (
+    args.sme2_vs_phase_space
+    and args.discrete_method != "sgdm"
+):
+    raise ValueError(
+        "--sme2_vs_phase_space requires "
+        "--discrete_method sgdm."
+    )
+
 
 if DEBUG:
     num_steps = 1
@@ -802,7 +830,10 @@ algorithms = [
     REFERENCE_ALGORITHM,
 ]
 
-if args.sme2_only:
+if (
+    args.sme2_only
+    or args.sme2_vs_phase_space
+):
     algorithms.append(
         "Momentum-SME-2"
     )
@@ -2959,6 +2990,282 @@ def run_sme2_loss_trials(
         all_losses,
     )
 
+def run_phase_space_loss_trials(
+    keys,
+    num_steps,
+    eta,
+    mu,
+    sigma,
+    dt,
+    init_param,
+    batch_size,
+):
+    """
+    Loss-only Euler-Maruyama simulation of Li's
+    constant-momentum phase-space SME-1:
+
+        dV = [-(1-mu)/eta * V - grad f(X)] dt
+             + sqrt(eta) * sigma dW,
+
+        dX = V/eta dt.
+
+    The phase-space state is not stored. Only the objective
+    value at times eta, 2*eta, ..., num_steps*eta is retained.
+    """
+
+    init_x, _ = ravel_pytree(
+        init_param
+    )
+
+    eta_value = jnp.asarray(
+        eta,
+        dtype=init_x.dtype,
+    )
+
+    mu_value = jnp.asarray(
+        mu,
+        dtype=init_x.dtype,
+    )
+
+    sigma_value = jnp.asarray(
+        sigma,
+        dtype=init_x.dtype,
+    )
+
+    dt_value = jnp.asarray(
+        dt,
+        dtype=init_x.dtype,
+    )
+
+    # Number of Euler-Maruyama substeps corresponding to one
+    # SGDM observation interval of physical length eta.
+    ratio_value = eta / dt
+
+    substeps_per_observation = int(
+        round(
+            ratio_value
+        )
+    )
+
+    if substeps_per_observation <= 0:
+        raise ValueError(
+            "The phase-space solver requires at least "
+            "one substep per SGDM observation."
+        )
+
+    if not np.isclose(
+        substeps_per_observation * dt,
+        eta,
+        rtol=1e-10,
+        atol=1e-14,
+    ):
+        raise ValueError(
+            "eta/dt must be an integer for the fixed-step "
+            "phase-space solver. Received "
+            f"eta={eta}, dt={dt}, eta/dt={ratio_value}."
+        )
+
+    sqrt_noise_scale = (
+        jnp.sqrt(
+            eta_value * dt_value
+        )
+        * sigma_value
+    )
+
+    def run_single_trial(key):
+        def observation_step(
+            carry,
+            unused_input,
+        ):
+            del unused_input
+
+            velocity, position, current_key = (
+                carry
+            )
+
+            def euler_maruyama_substep(
+                unused_index,
+                substep_carry,
+            ):
+                del unused_index
+
+                (
+                    current_velocity,
+                    current_position,
+                    substep_key,
+                ) = substep_carry
+
+                substep_key, noise_key = (
+                    jax.random.split(
+                        substep_key
+                    )
+                )
+
+                gradient = grad_loss(
+                    current_position
+                )
+
+                gaussian_noise = (
+                    jax.random.normal(
+                        noise_key,
+                        current_position.shape,
+                        dtype=current_position.dtype,
+                    )
+                )
+
+                velocity_drift = (
+                    -(
+                        1.0 - mu_value
+                    )
+                    * current_velocity
+                    / eta_value
+                    - gradient
+                )
+
+                new_velocity = (
+                    current_velocity
+                    + dt_value
+                    * velocity_drift
+                    + sqrt_noise_scale
+                    * gaussian_noise
+                )
+
+                # Explicit Euler uses the velocity at the
+                # beginning of the substep.
+                new_position = (
+                    current_position
+                    + dt_value
+                    * current_velocity
+                    / eta_value
+                )
+
+                return (
+                    new_velocity,
+                    new_position,
+                    substep_key,
+                )
+
+            (
+                velocity,
+                position,
+                current_key,
+            ) = jax.lax.fori_loop(
+                0,
+                substeps_per_observation,
+                euler_maruyama_substep,
+                (
+                    velocity,
+                    position,
+                    current_key,
+                ),
+            )
+
+            loss = loss_fn_flat(
+                position
+            )
+
+            return (
+                (
+                    velocity,
+                    position,
+                    current_key,
+                ),
+                loss,
+            )
+
+        initial_velocity = jnp.zeros_like(
+            init_x
+        )
+
+        _, losses = jax.lax.scan(
+            observation_step,
+            (
+                initial_velocity,
+                init_x,
+                key,
+            ),
+            xs=None,
+            length=num_steps,
+        )
+
+        return losses
+
+    all_loss_batches = []
+
+    number_of_runs = int(
+        keys.shape[0]
+    )
+
+    for batch_start in range(
+        0,
+        number_of_runs,
+        batch_size,
+    ):
+        batch_end = min(
+            batch_start + batch_size,
+            number_of_runs,
+        )
+
+        batch_keys = keys[
+            batch_start:batch_end
+        ]
+
+        if int(batch_keys.shape[0]) == 1:
+            batch_losses = (
+                run_single_trial(
+                    batch_keys[0]
+                )[None, :]
+            )
+        else:
+            batch_losses = jax.vmap(
+                run_single_trial
+            )(batch_keys)
+
+        batch_losses = (
+            jax.block_until_ready(
+                batch_losses
+            )
+        )
+
+        if not bool(
+            jnp.all(
+                jnp.isfinite(
+                    batch_losses
+                )
+            )
+        ):
+            raise FloatingPointError(
+                "A phase-space SME-1 loss was NaN or "
+                "infinite in the batch beginning at run "
+                f"{batch_start + 1}."
+            )
+
+        all_loss_batches.append(
+            batch_losses
+        )
+
+        print(
+            "  completed phase-space SME-1 runs "
+            f"{batch_start + 1}-{batch_end} "
+            f"of {number_of_runs}",
+            flush=True,
+        )
+
+    all_losses = jnp.concatenate(
+        all_loss_batches,
+        axis=0,
+    )
+
+    average_losses = jnp.mean(
+        all_losses,
+        axis=0,
+    )
+
+    return (
+        average_losses,
+        all_losses,
+    )
+
 
 def run_discrete_reference_trials(
     keys,
@@ -4800,6 +5107,314 @@ if args.momentum_dal_fig19:
 
     # This flag runs a stand-alone inexpensive experiment.
     # Do not continue into all of the SDE/PF simulations.
+    if not DEBUG:
+        writer.close()
+
+    raise SystemExit(0)
+
+if args.sme2_vs_phase_space:
+    trial_root_key = jax.random.fold_in(
+        key,
+        1000003,
+    )
+
+    reference_keys = jax.random.split(
+        jax.random.fold_in(
+            trial_root_key,
+            0,
+        ),
+        num_runs,
+    )
+
+    sme2_keys = jax.random.split(
+        jax.random.fold_in(
+            trial_root_key,
+            1,
+        ),
+        num_runs,
+    )
+
+    phase_space_keys = jax.random.split(
+        jax.random.fold_in(
+            trial_root_key,
+            2,
+        ),
+        num_runs,
+    )
+
+    # ------------------------------------------------------
+    # Discrete SGDM reference
+    # ------------------------------------------------------
+
+    print(
+        "\nRunning loss-only SGDM reference...",
+        flush=True,
+    )
+
+    (
+        reference_avg_losses,
+        _,
+    ) = run_discrete_reference_loss_trials(
+        keys=reference_keys,
+        num_steps=num_steps,
+        eta=eta,
+        mu=mu,
+        sigma=sigma,
+        init_param=init_param,
+        batch_size=args.sde_batch_size,
+    )
+
+    # ------------------------------------------------------
+    # M-SME-2
+    # ------------------------------------------------------
+
+    print(
+        "Running loss-only M-SME-2...",
+        flush=True,
+    )
+
+    (
+        sme2_avg_losses,
+        _,
+    ) = run_sme2_loss_trials(
+        keys=sme2_keys,
+        num_steps=num_steps,
+        eta=eta,
+        mu=mu,
+        sigma=sigma,
+        dt=dt,
+        init_param=init_param,
+        brownian_tol=brownian_tol,
+        batch_size=args.sde_batch_size,
+    )
+
+    # ------------------------------------------------------
+    # Phase-space SME-1
+    # ------------------------------------------------------
+
+    print(
+        "Running loss-only phase-space SME-1...",
+        flush=True,
+    )
+
+    (
+        phase_space_avg_losses,
+        _,
+    ) = run_phase_space_loss_trials(
+        keys=phase_space_keys,
+        num_steps=num_steps,
+        eta=eta,
+        mu=mu,
+        sigma=sigma,
+        dt=dt,
+        init_param=init_param,
+        batch_size=args.sde_batch_size,
+    )
+
+    # ------------------------------------------------------
+    # Weak objective errors relative to SGDM
+    # ------------------------------------------------------
+
+    sme2_weak_error = jnp.abs(
+        sme2_avg_losses
+        - reference_avg_losses
+    )
+
+    phase_space_weak_error = jnp.abs(
+        phase_space_avg_losses
+        - reference_avg_losses
+    )
+
+    sme2_max_index = int(
+        jnp.argmax(
+            sme2_weak_error
+        )
+    )
+
+    phase_space_max_index = int(
+        jnp.argmax(
+            phase_space_weak_error
+        )
+    )
+
+    print(
+        "\nM-SME-2 versus phase-space SME-1:"
+    )
+
+    print(
+        "  M-SME-2 maximum weak loss error:",
+        f"{float(jnp.max(sme2_weak_error)):.12e}",
+        "at step",
+        sme2_max_index + 1,
+    )
+
+    print(
+        "  phase-space SME-1 maximum weak loss error:",
+        f"{float(jnp.max(phase_space_weak_error)):.12e}",
+        "at step",
+        phase_space_max_index + 1,
+    )
+
+    print(
+        "  M-SME-2 terminal weak loss error:",
+        f"{float(sme2_weak_error[-1]):.12e}",
+    )
+
+    print(
+        "  phase-space SME-1 terminal weak loss error:",
+        f"{float(phase_space_weak_error[-1]):.12e}",
+    )
+
+    print(
+        "  M-SME-2 RMS weak loss error:",
+        f"{float(jnp.sqrt(jnp.mean(sme2_weak_error**2))):.12e}",
+    )
+
+    print(
+        "  phase-space SME-1 RMS weak loss error:",
+        f"{float(jnp.sqrt(jnp.mean(phase_space_weak_error**2))):.12e}",
+    )
+
+    # ------------------------------------------------------
+    # Plot
+    # ------------------------------------------------------
+
+    plot_dir = Path(
+        args.plot_dir
+    )
+
+    plot_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    step_values = np.arange(
+        1,
+        num_steps + 1,
+        dtype=np.int64,
+    )
+
+    tiny = np.finfo(
+        np.float64
+    ).tiny
+
+    sme2_plot_values = np.maximum(
+        np.asarray(
+            sme2_weak_error,
+            dtype=np.float64,
+        ),
+        tiny,
+    )
+
+    phase_space_plot_values = np.maximum(
+        np.asarray(
+            phase_space_weak_error,
+            dtype=np.float64,
+        ),
+        tiny,
+    )
+
+    plt.figure(
+        figsize=(9, 5.5)
+    )
+
+    plt.plot(
+        step_values,
+        sme2_plot_values,
+        color="tab:green",
+        linewidth=2.3,
+        label="M-SME-2",
+    )
+
+    plt.plot(
+        step_values,
+        phase_space_plot_values,
+        color="tab:red",
+        linestyle="--",
+        linewidth=2.3,
+        label="Phase-space momentum SME-1",
+    )
+
+    plt.scatter(
+        sme2_max_index + 1,
+        sme2_plot_values[
+            sme2_max_index
+        ],
+        color="tab:green",
+        s=40,
+        zorder=5,
+    )
+
+    plt.scatter(
+        phase_space_max_index + 1,
+        phase_space_plot_values[
+            phase_space_max_index
+        ],
+        color="tab:red",
+        s=40,
+        zorder=5,
+    )
+
+    plt.yscale(
+        "log"
+    )
+
+    plt.xlabel(
+        "SGDM step"
+    )
+
+    plt.ylabel(
+        r"$|\widehat{\mathbb{E}}[f(X_{k\eta})]"
+        r"-\widehat{\mathbb{E}}[f(x_k)]|$"
+    )
+
+    plt.title(
+        "Weak objective error relative to SGDM\n"
+        "M-SME-2 versus phase-space momentum SME-1"
+    )
+
+    plt.grid(
+        True,
+        which="both",
+        alpha=0.3,
+    )
+
+    plt.legend()
+    plt.tight_layout()
+
+    hidden_width_tag = "x".join(
+        str(width)
+        for width in hidden_widths
+    )
+
+    comparison_plot_name = (
+        f"sme2_vs_phase_space_weak_error_"
+        f"dataset_{args.dataset}_"
+        f"architecture_{args.architecture}_"
+        f"widths_{hidden_width_tag}_"
+        f"activation_{args.activation}_"
+        f"mu_{mu:g}_"
+        f"eta_{eta:g}_"
+        f"sigma_{sigma:g}_"
+        f"steps_{num_steps}_"
+        f"runs_{num_runs}_"
+        f"ratio_{args.eta_dt_ratio:g}_"
+        f"seed_{args.seed}.png"
+    )
+
+    plt.savefig(
+        plot_dir / comparison_plot_name,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    plt.close()
+
+    print(
+        "\nComparison plot saved to:",
+        plot_dir / comparison_plot_name,
+    )
+
     if not DEBUG:
         writer.close()
 
